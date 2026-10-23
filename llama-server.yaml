@@ -1,0 +1,81 @@
+# llama.cpp llama-server on k3sm, serving Qwen3-1.7B (Q4_K_M GGUF) on the Metal GPU.
+# Prerequisite: the llama-server:0.7.0 image in the node store (see llama-server-image/).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llama-models
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path   # required: k3sm has no default StorageClass
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llama-server
+  labels:
+    app: llama-server
+spec:
+  nodeSelector:
+    kubernetes.io/os: darwin
+  tolerations:
+    - key: k3sm.io/provider
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: llama-server
+      image: llama-server:0.7.0      # bundled Homebrew build; /opt is unreadable from pods
+      imagePullPolicy: Never         # loaded with `k3sm image load`, not pulled
+      args:
+        - -hf
+        - ggml-org/Qwen3-1.7B-GGUF:Q4_K_M
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8080"
+        - --ctx-size
+        - "8192"
+      env:
+        - name: LLAMA_CACHE        # where -hf downloads the GGUF
+          value: /models
+        - name: HOME               # unset in k3sm pods
+          value: /models
+        - name: SSL_CERT_FILE      # Homebrew OpenSSL's default CA bundle is under /opt (unreadable)
+          value: /etc/ssl/cert.pem
+      ports:
+        - name: http
+          containerPort: 8080
+      volumeMounts:
+        - name: models
+          mountPath: /models
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        periodSeconds: 5
+      resources:
+        limits:
+          memory: 6Gi              # required when requesting the GPU
+          mlx.k3sm.io/gpu: 1       # Metal access
+  volumes:
+    - name: models
+      persistentVolumeClaim:
+        claimName: llama-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-server
+spec:
+  # k3sm binds LoadBalancer ports on every host interface:
+  # reachable at http://localhost:8080 and http://<mac-lan-ip>:8080.
+  # (The advertised 100.64.x EXTERNAL-IP is not routable from the LAN.)
+  type: LoadBalancer
+  selector:
+    app: llama-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
